@@ -4,6 +4,7 @@ import { supabase } from './supabaseClient';
 import AuthScreen from './components/AuthScreen';
 import Portfolio from './components/Portfolio';
 import { Cat, Search, ShoppingBag, LogOut, Activity, Loader2, Brain } from 'lucide-react';
+import { HfInference } from "@huggingface/inference";
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -81,22 +82,37 @@ export default function App() {
     } finally { setLoading(false); }
   };
 
+  // AI
   const handleAIAnalyze = async () => {
-    const now = Date.now();
-    if (now - lastCallTime.current < 60000) {
-      setAnalysis(`Snow is napping! Try again in ${Math.ceil((60000 - (now - lastCallTime.current)) / 1000)}s.`);
-      return;
-    }
     setIsAnalyzing(true);
-    lastCallTime.current = now;
     try {
-      const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_KEY);
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-      const prompt = `You are 'Snow', a helpful trading cat. Analyze: ${portfolio.map(([s, q]) => `${q}x ${s}`).join(", ")}. Be cute!`;
-      const result = await model.generateContent(prompt);
-      setAnalysis(result.response.text());
-    } catch { setAnalysis("Meow! Google had a brain freeze. Wait 60s."); }
-    finally { setIsAnalyzing(false); }
+      const hf = new HfInference(import.meta.env.VITE_HF_TOKEN);
+      const holdings = portfolio.map(([s, q]) => `${q}x ${s}`).join(", ");
+  
+      const out = await hf.chatCompletion({
+        model: "meta-llama/Meta-Llama-3-8B-Instruct",
+        messages: [
+          { 
+            role: "system", 
+            content: `You are Snow, an expert financial trading cat. 
+            Task: Analyze the user's portfolio risk.
+            Style: One brief paragraph. Use 2-3 cat puns. 
+            Focus: Tell them if they are too heavy in one sector (like Tech) or if they need more treats (diversification).` 
+          },
+          { role: "user", content: `Analyze my portfolio risk: ${holdings}` }
+        ],
+        max_tokens: 150,
+      });
+  
+      // This path is usually more reliable for the 'mapping' style responses
+      setAnalysis(out.choices[0].message.content);
+      
+    } catch (err) {
+      console.error("Snow Error:", err);
+      setAnalysis("Snow is chasing a red dot! (API busy, try once more).");
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   if (!session) return <AuthScreen />;
@@ -163,8 +179,11 @@ export default function App() {
                 <h3 className="text-[10px] font-black uppercase text-[#FF9E7D] flex items-center gap-2 tracking-widest">
                   <Brain size={16} /> Snow's Wisdom
                 </h3>
-                <button onClick={handleAIAnalyze} disabled={isAnalyzing} className="bg-[#FFF9F5] text-[#FF9E7D] px-6 py-2 rounded-full text-[10px] font-black uppercase hover:bg-[#FF9E7D] hover:text-white transition-all disabled:opacity-50 border border-orange-100">
-                  {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : "Analyze"}
+                <button
+                  onClick={handleAIAnalyze}
+                  className="bg-[#EE9D73] text-[#3D2B1F] px-8 py-2 rounded-full text-xs font-black uppercase hover:bg-[#E28A5B] transition-all shadow-md shadow-orange-200/50"
+                >
+                  {isAnalyzing ? "Thinking..." : "Analyze"}
                 </button>
               </div>
               <p className="text-[#5A5A5A] font-medium italic mb-2 tracking-tight">
