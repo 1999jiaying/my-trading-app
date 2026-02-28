@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { supabase } from './supabaseClient';
-import { Auth } from '@supabase/auth-ui-react';
-import { ThemeSupa } from '@supabase/auth-ui-shared';
-import { TrendingUp, Wallet, Search, BarChart3, ArrowUpRight } from 'lucide-react';
+import AuthScreen from './components/AuthScreen';
+import Portfolio from './components/Portfolio';
+import { Cat, Search, ShoppingBag, LogOut, Activity, Loader2, Brain } from 'lucide-react';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -10,154 +11,176 @@ export default function App() {
   const [symbol, setSymbol] = useState("");
   const [priceData, setPriceData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [portfolio, setPortfolio] = useState([]);
+  const [analysis, setAnalysis] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const lastCallTime = useRef(0);
 
-  // 1. Handle Authentication State
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
+    supabase.auth.getSession().then(({ data: { session: s } }) => setSession(s));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => subscription.unsubscribe();
   }, []);
 
-  // 2. Fetch User Profile (Balance) when logged in
   useEffect(() => {
-    if (session) fetchProfile();
+    if (session) { fetchProfile(); fetchPortfolio(); }
   }, [session]);
 
   async function fetchProfile() {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', session.user.id)
-      .single();
+    const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
     if (data) setProfile(data);
   }
 
-  // 3. Step 4 Logic: Fetch Real Price from Twelve Data
+  async function fetchPortfolio() {
+    const { data } = await supabase.from('trades').select('*').eq('user_id', session.user.id);
+    if (data) {
+      const summary = data.reduce((acc, trade) => {
+        const qty = trade.type === 'BUY' ? trade.quantity : -trade.quantity;
+        acc[trade.symbol] = (acc[trade.symbol] || 0) + qty;
+        return acc;
+      }, {});
+      setPortfolio(Object.entries(summary).filter(([_, qty]) => qty > 0));
+    }
+  }
+
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!symbol) return;
     setLoading(true);
-    const API_KEY = import.meta.env.VITE_TWELVE_DATA_KEY;
-    
     try {
-      const res = await fetch(`https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${API_KEY}`);
+      const res = await fetch(`https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${import.meta.env.VITE_TWELVE_DATA_KEY}`);
       const data = await res.json();
-      if (data.status === "error") throw new Error("Not found");
+      if (data.status === "error") throw new Error();
       setPriceData(data);
-    } catch (err) {
-      alert("Symbol not found or API limit reached.");
-    } finally {
-      setLoading(false);
-    }
+    } catch {
+      alert("Ticker not found! Try 'NVDA' or 'TSLA'.");
+    } finally { setLoading(false); }
   };
 
-  // 4. Trade Logic: Deduct money and save trade to Supabase
   const handleBuy = async () => {
     const cost = parseFloat(priceData.close);
-    if (profile.balance < cost) return alert("Not enough paper money!");
-
-    const { error: tradeErr } = await supabase.from('trades').insert([
-      { user_id: session.user.id, symbol: priceData.symbol, quantity: 1, price_at_trade: cost, type: 'BUY' }
-    ]);
-
-    if (!tradeErr) {
-      const { error: balErr } = await supabase
-        .from('profiles')
-        .update({ balance: profile.balance - cost })
-        .eq('id', session.user.id);
-      
-      if (!balErr) {
-        fetchProfile(); // Refresh balance on screen
-        alert(`Bought 1 share of ${priceData.symbol}!`);
-      }
+    if (profile.balance < cost) return alert("Not enough treats! 🐾");
+    const { error } = await supabase.from('trades').insert([{ user_id: session.user.id, symbol: priceData.symbol, quantity: 1, price_at_trade: cost, type: 'BUY' }]);
+    if (!error) {
+      await supabase.from('profiles').update({ balance: profile.balance - cost }).eq('id', session.user.id);
+      fetchProfile(); fetchPortfolio();
     }
   };
 
-  // --- LOGIN SCREEN ---
-  if (!session) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-950 p-4">
-        <div className="w-full max-w-md bg-gray-900 p-8 rounded-2xl border border-gray-800 shadow-2xl">
-          <h1 className="text-2xl font-bold text-white mb-6 text-center">PaperTrader v2026</h1>
-          <Auth supabaseClient={supabase} appearance={{ theme: ThemeSupa }} theme="dark" />
-        </div>
-      </div>
-    );
-  }
+  const handleSell = async (sym) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`https://api.twelvedata.com/price?symbol=${sym}&apikey=${import.meta.env.VITE_TWELVE_DATA_KEY}`);
+      const data = await res.json();
+      const price = parseFloat(data.price);
+      const { error } = await supabase.from('trades').insert([{ user_id: session.user.id, symbol: sym, quantity: 1, price_at_trade: price, type: 'SELL' }]);
+      if (!error) {
+        await supabase.from('profiles').update({ balance: profile.balance + price }).eq('id', session.user.id);
+        fetchProfile(); fetchPortfolio();
+      }
+    } finally { setLoading(false); }
+  };
 
-  // --- DASHBOARD SCREEN ---
+  const handleAIAnalyze = async () => {
+    const now = Date.now();
+    if (now - lastCallTime.current < 60000) {
+      setAnalysis(`Snow is napping! Try again in ${Math.ceil((60000 - (now - lastCallTime.current)) / 1000)}s.`);
+      return;
+    }
+    setIsAnalyzing(true);
+    lastCallTime.current = now;
+    try {
+      const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_KEY);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+      const prompt = `You are 'Snow', a helpful trading cat. Analyze: ${portfolio.map(([s, q]) => `${q}x ${s}`).join(", ")}. Be cute!`;
+      const result = await model.generateContent(prompt);
+      setAnalysis(result.response.text());
+    } catch { setAnalysis("Meow! Google had a brain freeze. Wait 60s."); }
+    finally { setIsAnalyzing(false); }
+  };
+
+  if (!session) return <AuthScreen />;
+
   return (
-    <div className="min-h-screen bg-black text-white p-6 font-sans">
-      <nav className="flex justify-between items-center mb-10 border-b border-gray-800 pb-6">
-        <div className="flex items-center gap-2">
-          <TrendingUp className="text-green-500" />
-          <span className="text-xl font-bold tracking-tight uppercase">MockTrade</span>
-        </div>
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2 bg-gray-900 px-4 py-2 rounded-full border border-gray-800">
-            <Wallet size={18} className="text-yellow-500" />
-            <span className="font-mono font-bold">${Number(profile.balance).toLocaleString()}</span>
-          </div>
-          <button onClick={() => supabase.auth.signOut()} className="text-gray-400 hover:text-white text-sm transition">Logout</button>
-        </div>
-      </nav>
+    <div className="min-h-screen bg-[#FFF9F5] text-[#4A4A4A] font-sans antialiased">
+      {/* PEACH GLOW BLOBS */}
+      <div className="fixed top-[-5%] left-[-5%] w-[400px] h-[400px] bg-[#FF9E7D]/10 blur-[100px] rounded-full pointer-events-none" />
+      <div className="fixed bottom-[5%] right-[-5%] w-[300px] h-[300px] bg-[#FF9E7D]/10 blur-[80px] rounded-full pointer-events-none" />
 
-      <main className="grid grid-cols-1 lg:grid-cols-3 gap-8 max-w-7xl mx-auto">
-        {/* Market Search Panel */}
-        <div className="lg:col-span-2 space-y-6">
-          <section className="bg-gray-900 p-8 rounded-2xl border border-gray-800 shadow-lg">
-            <form onSubmit={handleSearch} className="flex gap-4 mb-8">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-3 text-gray-500" size={20} />
-                <input 
-                  value={symbol}
-                  onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-                  placeholder="Enter Stock Symbol (e.g., AAPL, TSLA, BTC/USD)" 
-                  className="bg-gray-950 border border-gray-700 rounded-xl pl-11 pr-4 py-3 text-white w-full focus:ring-2 focus:ring-green-500 transition outline-none"
-                />
-              </div>
-              <button disabled={loading} className="bg-green-600 hover:bg-green-500 px-8 rounded-xl font-bold transition disabled:opacity-50">
-                {loading ? '...' : 'Search'}
-              </button>
+      <div className="max-w-[1200px] mx-auto min-h-screen p-8 relative z-10">
+        <header className="flex justify-between items-center mb-12">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-[#FF9E7D] rounded-[1.2rem] flex items-center justify-center text-white shadow-lg">
+              <Cat size={26} />
+            </div>
+            <h1 className="text-2xl font-black text-[#2D2D2D] uppercase tracking-tight">Trading Cat</h1>
+          </div>
+          <div className="flex items-center gap-4 bg-white px-6 py-3 rounded-full shadow-sm border border-orange-50">
+            <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Treat Jar</span>
+            <span className="text-xl font-mono font-black text-[#2D2D2D]">${Number(profile.balance).toLocaleString()}</span>
+            <button onClick={() => supabase.auth.signOut()} className="ml-4 text-gray-300 hover:text-red-400"><LogOut size={20} /></button>
+          </div>
+        </header>
+
+        <main className="grid lg:grid-cols-12 gap-8">
+          <div className="lg:col-span-7 space-y-8">
+            <form onSubmit={handleSearch} className="relative group">
+              <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-[#FF9E7D] opacity-50" size={20} />
+              <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} placeholder="Hunt for tickers..." className="w-full bg-white border-none rounded-full py-6 pl-16 pr-6 shadow-sm focus:ring-2 ring-[#FF9E7D]/20 outline-none font-medium" />
             </form>
 
-            {priceData && (
-              <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="flex justify-between items-end mb-6">
+            {priceData ? (
+              <div className="bg-white rounded-[3rem] p-10 shadow-xl shadow-orange-100/20 border border-orange-50">
+                <div className="flex justify-between items-start mb-10">
                   <div>
-                    <h2 className="text-4xl font-black">{priceData.symbol}</h2>
-                    <p className="text-gray-400">{priceData.name}</p>
+                    <h2 className="text-6xl font-black text-[#2D2D2D]">{priceData.symbol}</h2>
+                    <p className="text-gray-400 font-bold mt-1 uppercase text-xs">{priceData.name}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-3xl font-mono text-green-400">${parseFloat(priceData.close).toFixed(2)}</p>
-                    <p className="text-gray-400 text-sm">Real-time Price</p>
+                    <p className="text-4xl font-mono font-black text-[#2D2D2D]">${parseFloat(priceData.close).toFixed(2)}</p>
+                    <div className="flex items-center justify-end gap-2 text-green-500 font-black text-[10px] mt-2">
+                      <div className="w-2 h-2 bg-green-500 rounded-full animate-ping" /> LIVE HUNT
+                    </div>
                   </div>
                 </div>
-                <button 
+                <button
                   onClick={handleBuy}
-                  className="w-full bg-white text-black py-4 rounded-xl font-black text-lg hover:bg-gray-200 flex items-center justify-center gap-2 transition"
+                  className="w-full bg-[#E88B5B] hover:bg-[#D67A4A] py-6 rounded-[2rem] text-[#2D2D2D] font-black text-xl uppercase tracking-widest shadow-[0_10px_25px_rgba(232,139,91,0.3)] flex items-center justify-center gap-3 transition-all active:scale-95"
                 >
-                  <ArrowUpRight size={20} /> EXECUTE BUY ORDER
+                  <ShoppingBag size={24} />
+                  Execute Order
                 </button>
               </div>
+            ) : (
+              <div className="h-64 rounded-[3rem] border-4 border-dashed border-orange-100/30 flex flex-col items-center justify-center text-orange-200">
+                <Cat size={48} className="mb-2 opacity-20" />
+                <p className="text-xs font-black uppercase tracking-widest opacity-40">Ready to pounce?</p>
+              </div>
             )}
-          </section>
-        </div>
 
-        {/* Portfolio Section */}
-        <div className="space-y-6">
-          <section className="bg-gray-900 p-6 rounded-2xl border border-gray-800 h-full">
-            <h2 className="text-lg font-bold mb-4 flex items-center gap-2 border-b border-gray-800 pb-4">
-              <BarChart3 size={18} className="text-blue-500" /> Current Assets
-            </h2>
-            <div className="flex flex-col items-center justify-center h-48 text-gray-600">
-              <p className="text-sm">Trades you execute will appear here.</p>
+            <div className="bg-white rounded-[2.5rem] p-8 shadow-sm border border-orange-50 relative">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-[10px] font-black uppercase text-[#FF9E7D] flex items-center gap-2 tracking-widest">
+                  <Brain size={16} /> Snow's Wisdom
+                </h3>
+                <button onClick={handleAIAnalyze} disabled={isAnalyzing} className="bg-[#FFF9F5] text-[#FF9E7D] px-6 py-2 rounded-full text-[10px] font-black uppercase hover:bg-[#FF9E7D] hover:text-white transition-all disabled:opacity-50 border border-orange-100">
+                  {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : "Analyze"}
+                </button>
+              </div>
+              <p className="text-[#5A5A5A] font-medium italic mb-2 tracking-tight">
+                {analysis || "Let Snow help you analyze your portfolio!"}
+              </p>
             </div>
-          </section>
-        </div>
-      </main>
+          </div>
+
+          <aside className="lg:col-span-5">
+            <div className="bg-white rounded-[2.5rem] p-8 shadow-sm border border-orange-50 h-full min-h-[500px]">
+              <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-8">My Assets</h3>
+              <Portfolio portfolio={portfolio} onSell={handleSell} />
+            </div>
+          </aside>
+        </main>
+      </div>
     </div>
   );
 }
