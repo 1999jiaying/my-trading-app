@@ -14,6 +14,7 @@ export default function AuthScreen() {
         <p className="text-sm text-gray-400 mb-8 font-medium italic">Your cozy corner for paper trading.</p>
         <Auth 
           supabaseClient={supabase} 
+          providers={[]} // This line hides the social login buttons
           appearance={{ 
             theme: ThemeSupa,
             variables: {
